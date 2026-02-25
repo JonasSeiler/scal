@@ -1,0 +1,14 @@
+- menu switch keys
+    - decide which mod
+- add appointment
+- add a mark system
+    - deadline
+    - timestamp
+    - range (superday)
+    - range (subday)
+- change appointment
+- move appointment
+- sort appointments
+- appointment preview 
+- next appointments
+- quit v/
