@@ -1,5 +1,9 @@
-package main
+package scal
 
+import "base:runtime"
+import "core:sync/chan"
+import "core:sync"
+import "core:thread"
 import "core:os"
 import "core:strconv"
 import "core:fmt"
@@ -140,10 +144,19 @@ render_days :: proc(s: ^t.Window, y: int, m: time.Month) {
     }
 }
 
-hl_day :: proc(s: ^t.Window, y, d : int, m : time.Month) {
+hl_day :: proc(s: ^t.Window, y, d : int, m : time.Month, bl : ^blink, men : menu) {
     t.reset_styles(s)
-    t.set_color_style(s, .Black, .White)
-    t.set_text_style(s, {.Bold})
+    if men == .d {
+        check_blink(bl)
+        if bl.flash {
+            t.set_color_style(s, .Black, .White)
+            t.set_text_style(s, {.Bold})
+        } 
+    } else {
+        t.set_color_style(s, .Black, .White)
+        t.set_text_style(s, {.Bold})
+    }
+
     t.move_cursor(s, 2, 1)
     mi := m_int(m)
     first := time.datetime_to_time(y, mi, 1, 12, 0, 0)
@@ -196,7 +209,8 @@ render_title :: proc (s: ^t.Window) {
     t.write(s, "  \\__ \\ |__| (_| | |")
     t.move_cursor(s, 4, 0)
     t.write(s, "  |___/\\____\\__,_|_|")
-    ts := t.get_window_size(s)
+
+    ts := t.get_term_size()
 
     t.reset_styles(s)
     t.move_cursor(s, 6, 0)
@@ -205,6 +219,7 @@ render_title :: proc (s: ^t.Window) {
     }
     t.move_cursor(s, 6, 8)
     t.write(s, "┬")
+    t.write(s, fmt.tprint(ts.w-1))
 }
 
 inc_m :: proc(m: time.Month, y : int) -> (time.Month, int) {
@@ -242,10 +257,21 @@ dec_m :: proc(m: time.Month, y : int) -> (time.Month, int) {
     return nil, 0
 }
 
-hl_month :: proc(s: ^t.Window, m: time.Month) {
+hl_month :: proc(s: ^t.Window, m: time.Month, bl : ^blink, men : menu) {
     t.reset_styles(s)
-    t.set_color_style(s, .Black, .White)
-    t.set_text_style(s, {.Bold})
+    if men == .m {
+        check_blink(bl)
+        if bl.flash {
+            t.set_color_style(s, .Black, .White)
+            t.set_text_style(s, {.Bold})
+        } else {
+            t.set_text_style(s, {.Bold})
+        }
+    } else {
+            t.set_color_style(s, .Black, .White)
+            t.set_text_style(s, {.Bold})
+    }
+
     switch  m {
         case .January:
             t.move_cursor(s, 1, 2)
@@ -286,15 +312,49 @@ hl_month :: proc(s: ^t.Window, m: time.Month) {
     }
 }
 
+check_blink :: proc(bl : ^blink) {
+     if time.since(bl.last) >= bl.interval {
+        bl.flash = !bl.flash
+        bl.last = time.now()
+    } 
+}
+
 menu :: enum {
    y = 0,
    m = 1,
    d = 2
 }
 
+blink :: struct {
+    last : time.Time,
+    flash : bool,
+    interval : time.Duration
+}
+
+event :: struct {
+    k : t.Input,
+    q : quit_event,
+}
+
+quit_event :: struct {}
+
+key_event :: struct {
+    key : t.Key,
+    mod : t.Mod
+    
+}
+
+
+Inp_Channel :: chan.Chan(t.Input)
+
 main :: proc() {
 
     y_flag, m_flag, d_flag := time.date(time.now())
+    bl : blink 
+    bl.last = time.now()
+    bl.flash = true
+    bl.interval = time.Millisecond * 300
+
     s := t.init_screen(term.VTABLE, context.allocator)
     defer t.destroy_screen(&s)
     t.set_term_mode(&s, .Raw)
@@ -306,37 +366,63 @@ main :: proc() {
     defer t.destroy_window(&dw)
     defer t.destroy_window(&title)
     defer t.destroy_window(&side_bar)
+    
+    inp_chan, err := chan.create(Inp_Channel, 2, context.allocator)
+    defer chan.destroy(inp_chan)
+
+    inp_thread := thread.create(input_proc)
+    inp_thread.data = &inp_chan
+    thread.start(inp_thread)
+    defer thread.terminate(inp_thread, 0)
+    
 
     main_loop: for {
         t.clear(&s, .Everything)
+        t_size = t.get_term_size()
         defer t.blit(&dw)
-        defer t.blit(&title)
         defer t.blit(&side_bar)
+        defer t.blit(&title)
         defer t.reset_styles(&s)
         t.hide_cursor(true)
 
         render_months(&side_bar)
-        hl_month(&side_bar, m_flag)
+        hl_month(&side_bar, m_flag, &bl, c_menu)
         render_year(&side_bar, y_flag)
         render_title(&title)
         render_wd(&dw)
         render_days(&dw, y_flag, m_flag)
-        hl_day(&dw,y_flag, d_flag, m_flag)
+        hl_day(&dw,y_flag, d_flag, m_flag, &bl, c_menu)
+
+        input, ok := chan.try_recv(inp_chan)
+        if ok {
+            t.move_cursor(&dw, 0, 0)
+            #partial switch input.(t.Keyboard_Input).key {
+                case .J:
+                    t.write(&dw, "j")
+                case .A: 
+                    t.write(&dw, "a")
+                case .None:
+                    t.write(&dw, "none")
+
+            }
+            ok = false
+            input = nil
+        }
 
         inp, i_ok := t.read(&s).(t.Keyboard_Input)
         if i_ok do #partial switch inp.key {
         // movement keys
         case .J:
-            if c_menu == .m do m_flag, y_flag = inc_m(m_flag, y_flag)
-            else if c_menu == .y do if y_flag > 1700 do y_flag -= 1
-            else if c_menu == .d {
-                if d_flag+7<=int(m_len(y_flag, m_flag)) do d_flag += 7
+            switch c_menu {
+            case .m: m_flag, y_flag = inc_m(m_flag, y_flag)
+            case .y: if y_flag > 1700 do y_flag -= 1
+            case .d: if d_flag+7<=int(m_len(y_flag, m_flag)) do d_flag += 7
             }
         case .K:
-            if c_menu == .m do m_flag, y_flag= dec_m(m_flag, y_flag)
-            else if c_menu == .y do if y_flag < 2200 do y_flag += 1
-            else if c_menu == .d {
-                if d_flag-7>0 do d_flag -= 7
+            switch c_menu {
+            case .m: m_flag, y_flag= dec_m(m_flag, y_flag)
+            case .y: if y_flag < 2200 do y_flag += 1
+            case .d: if d_flag-7>0 do d_flag -= 7
             }
         case .L:
             if c_menu == .d do if(d_flag<int(m_len(y_flag, m_flag))) do d_flag += 1
@@ -368,28 +454,20 @@ main :: proc() {
         
         // command keys
         case .Q: break main_loop
-
         case .I:
-            desc := os.Process_Desc {
-                command = []string{"tmux", "split", "nvim", "./"},
-                stdin = os.stdin,
-                stdout = os.stdout, 
-                stderr = os.stderr
+            file := build_file_name(y_flag, m_flag, d_flag)
+            defer delete(file)
+            arg := flags {
+                t1 = 19, 
+                m1 = 30,
+                tp = true,
+                rep = .daily
             }
-            process, start_err := os.process_start(desc)           
-            if start_err != nil {
-                return
-            }
-            state, wait_err := os.process_wait(process)
-            if wait_err != nil {
-                return 
-            }
-            clear := os.Process_Desc {
-                command = []string{"clear"},
-                stdin = os.stdin,
-                stdout = os.stdout, 
-                stderr = os.stderr
-            }
+            write_flags(file, arg)
+            desc := smart_split(t_size.h, t_size.w, file)
+            start_editor(desc)
+            t.write(&dw, file)
+
         //case .M:
 
         case .C:
@@ -398,7 +476,4 @@ main :: proc() {
 
         }
     }
-    
-    
-
-}
+}    
